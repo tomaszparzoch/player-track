@@ -43,7 +43,7 @@ bool write_pitch_heatmap_png(const std::filesystem::path& path,
   cv::line(color, {0, height_px - 1}, {width_px, height_px - 1}, {255, 255, 255}, 2);
   cv::line(color, {width_px / 2, 0}, {width_px / 2, height_px}, {255, 255, 255}, 2);
 
-  return cv::imwrite(path.string(), color);
+  return cv::imwrite(path.string(), color, {cv::IMWRITE_PNG_COMPRESSION, 9});
 }
 
 bool write_image_heatmap_png(const std::filesystem::path& path,
@@ -83,5 +83,57 @@ bool write_image_heatmap_png(const std::filesystem::path& path,
   cv::addWeighted(backdrop, 0.35, color, 0.65, 0.0, color);
   cv::rectangle(color, {0, 0, width_px - 1, height_px - 1}, {180, 180, 180}, 2);
 
-  return cv::imwrite(path.string(), color);
+  return cv::imwrite(path.string(), color, {cv::IMWRITE_PNG_COMPRESSION, 9});
+}
+
+bool write_pitch_event_diagram_png(const std::filesystem::path& path,
+                                   const std::vector<PitchEventMark>& marks,
+                                   double pitch_length_m, double pitch_width_m, bool pixel_mode,
+                                   int width_px, int height_px) {
+  if (width_px < 80 || height_px < 80) return false;
+
+  cv::Mat img(height_px, width_px, CV_8UC3, cv::Scalar(28, 110, 32));
+  const int pad = 18;
+  const cv::Rect field(pad, pad, width_px - 2 * pad, height_px - 2 * pad - 22);
+  cv::rectangle(img, field, cv::Scalar(255, 255, 255), 2);
+  cv::line(img, {field.x + field.width / 2, field.y},
+           {field.x + field.width / 2, field.y + field.height}, cv::Scalar(255, 255, 255), 1);
+  cv::circle(img, {field.x + field.width / 2, field.y + field.height / 2},
+             std::max(8, field.height / 8), cv::Scalar(255, 255, 255), 1);
+
+  auto to_px = [&](const cv::Point2d& pos) -> cv::Point {
+    double nx = 0.5;
+    double ny = 0.5;
+    if (pixel_mode) {
+      nx = pos.x / std::max(1.0, pitch_length_m);
+      ny = pos.y / std::max(1.0, pitch_width_m);
+    } else {
+      nx = pos.x / std::max(1e-6, pitch_length_m);
+      ny = pos.y / std::max(1e-6, pitch_width_m);
+    }
+    nx = std::clamp(nx, 0.0, 1.0);
+    ny = std::clamp(ny, 0.0, 1.0);
+    return {field.x + static_cast<int>(nx * field.width),
+            field.y + static_cast<int>(ny * field.height)};
+  };
+
+  std::vector<cv::Point> join_pts;
+  for (const auto& mark : marks) {
+    if (!mark.has_pos) continue;
+    const cv::Point px = to_px(mark.pos);
+    if (mark.label.rfind("J", 0) == 0) {
+      join_pts.push_back(px);
+    }
+    cv::circle(img, px, 7, mark.color, cv::FILLED);
+    cv::circle(img, px, 7, cv::Scalar(0, 0, 0), 1);
+    cv::putText(img, mark.label, {px.x + 8, px.y - 6}, cv::FONT_HERSHEY_SIMPLEX, 0.45,
+                cv::Scalar(255, 255, 255), 1, cv::LINE_AA);
+  }
+  if (join_pts.size() == 2) {
+    cv::line(img, join_pts[0], join_pts[1], cv::Scalar(0, 220, 255), 2, cv::LINE_AA);
+  }
+
+  cv::putText(img, "D=detect  L=lost  J=join  (1/2 = camera)", {pad, height_px - 8},
+              cv::FONT_HERSHEY_SIMPLEX, 0.38, cv::Scalar(230, 230, 230), 1, cv::LINE_AA);
+  return cv::imwrite(path.string(), img, {cv::IMWRITE_PNG_COMPRESSION, 9});
 }

@@ -36,11 +36,27 @@ struct GlobalTrackPoint {
   bool pixel_coords{false};
 };
 
+enum class PlayerEventKind { Detect, Lost, Join };
+
+struct PlayerEventPhoto {
+  PlayerEventKind kind{PlayerEventKind::Detect};
+  int camera_index{-1};
+  double t_s{-1.0};
+  cv::Rect2d bbox;
+  cv::Point2d world_m;
+  bool has_world{false};
+  cv::Mat image;
+};
+
 struct ResolvedPlayer {
   int player_number{-1};
+  int jersey_number{-1};
   TeamId team{TeamId::Unknown};
   std::vector<GlobalTrackPoint> trajectory;
   float identity_confidence{0.0f};
+  cv::Mat snapshot;
+  std::vector<PlayerEventPhoto> event_photos;
 };
 
 std::string team_to_string(TeamId team);
+std::string team_display_name(TeamId team, bool hall_mode);

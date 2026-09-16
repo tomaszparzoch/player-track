@@ -2,8 +2,14 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
+#include <string>
+#include <vector>
 
 #include <opencv2/core.hpp>
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
+#include <opencv2/videoio.hpp>
 
 #include "pitch_heatmap.hpp"
 
@@ -28,6 +34,49 @@ double hi_run_threshold(const ProjectConfig& config, bool pixel_mode) {
   return pixel_mode ? config.hi_run_threshold_m_s * 35.0 : config.hi_run_threshold_m_s;
 }
 
+cv::Mat crop_event_image(const cv::Mat& frame, const cv::Rect2d& bbox) {
+  if (frame.empty()) return {};
+  cv::Rect box(bbox);
+  const int pad_x = std::max(2, static_cast<int>(std::lround(box.width * 0.12)));
+  const int pad_y = std::max(2, static_cast<int>(std::lround(box.height * 0.08)));
+  box.x -= pad_x;
+  box.y -= pad_y;
+  box.width += pad_x * 2;
+  box.height += pad_y * 2;
+  box &= cv::Rect(0, 0, frame.cols, frame.rows);
+  if (box.width < 12 || box.height < 20) return {};
+  return frame(box).clone();
+}
+
+cv::Mat load_event_crop(const ProjectConfig& config, const PlayerEventPhoto& photo) {
+  if (!photo.image.empty()) return photo.image;
+  if (photo.camera_index < 0 ||
+      photo.camera_index >= static_cast<int>(config.cameras.size()) || photo.t_s < 0.0) {
+    return {};
+  }
+  const auto& cam = config.cameras[static_cast<size_t>(photo.camera_index)];
+  cv::VideoCapture cap(cam.video_path);
+  if (!cap.isOpened()) return {};
+  double fps = cap.get(cv::CAP_PROP_FPS);
+  if (fps < 1.0) fps = 25.0;
+  const int frame_idx =
+      std::max(0, static_cast<int>(std::lround((photo.t_s - cam.offset_s) * fps)));
+  cap.set(cv::CAP_PROP_POS_FRAMES, frame_idx);
+  cv::Mat frame;
+  if (!cap.read(frame) || frame.empty()) return {};
+  return crop_event_image(frame, photo.bbox);
+}
+
+bool save_event_jpg(const cv::Mat& image, const std::filesystem::path& path) {
+  if (image.empty()) return false;
+  cv::Mat snap = image;
+  if (snap.cols > 180 || snap.rows > 240) {
+    const double scale = std::min(180.0 / snap.cols, 240.0 / snap.rows);
+    cv::resize(snap, snap, {}, scale, scale, cv::INTER_AREA);
+  }
+  return cv::imwrite(path.string(), snap, {cv::IMWRITE_JPEG_QUALITY, 72});
+}
+
 }  // namespace
 
 std::vector<PlayerStatsReport> PlayerStatsEngine::compute(
@@ -50,6 +99,7 @@ std::vector<PlayerStatsReport> PlayerStatsEngine::compute(
 
     PlayerStatsReport report;
     report.player_number = player.player_number;
+    report.jersey_number = player.jersey_number;
     report.team = player.team;
     report.identity_confidence = player.identity_confidence;
     report.pixel_coords = pixel_mode;
@@ -130,15 +180,89 @@ std::vector<PlayerStatsReport> PlayerStatsEngine::compute(
     }
     bool wrote_heatmap = false;
     if (pixel_mode) {
-      wrote_heatmap = write_image_heatmap_png(
-          heatmap_path, pts, std::max(1, heatmap_frame_size.width),
-          std::max(1, heatmap_frame_size.height));
+      const double src_w = std::max(1, heatmap_frame_size.width);
+      const double src_h = std::max(1, heatmap_frame_size.height);
+      std::vector<cv::Point2d> scaled;
+      scaled.reserve(pts.size());
+      for (const auto& pt : pts) {
+        scaled.emplace_back(pt.x / src_w * 480.0, pt.y / src_h * 270.0);
+      }
+      wrote_heatmap = write_image_heatmap_png(heatmap_path, scaled, 480, 270);
     } else {
-      wrote_heatmap =
-          write_pitch_heatmap_png(heatmap_path, pts, config.pitch_length_m, config.pitch_width_m);
+      wrote_heatmap = write_pitch_heatmap_png(heatmap_path, pts, config.pitch_length_m,
+                                              config.pitch_width_m, 420, 272);
     }
     if (wrote_heatmap) {
       report.heatmap_png = heatmap_path;
+    }
+
+    const std::filesystem::path snapshot_dir = output_dir / "snapshots";
+    std::filesystem::create_directories(snapshot_dir, ec);
+    auto event_path = [&](const std::string& suffix) {
+      return snapshot_dir /
+             ("player_" + std::to_string(report.player_number) + "_" + suffix + ".jpg");
+    };
+
+    std::map<int, int> cam_slot;
+    std::vector<PitchEventMark> marks;
+    for (const auto& ev : player.event_photos) {
+      if (ev.camera_index < 0) continue;
+      if (!cam_slot.count(ev.camera_index) && static_cast<int>(cam_slot.size()) < 2) {
+        cam_slot[ev.camera_index] = static_cast<int>(cam_slot.size()) + 1;
+      }
+      const auto slot_it = cam_slot.find(ev.camera_index);
+      if (slot_it == cam_slot.end()) continue;
+      const int slot = slot_it->second;
+      const cv::Mat crop = load_event_crop(config, ev);
+      PitchEventMark mark;
+      mark.pos = ev.world_m;
+      mark.has_pos = ev.t_s >= 0.0;
+      const std::string slot_s = std::to_string(slot);
+      if (ev.kind == PlayerEventKind::Detect) {
+        mark.color = slot == 1 ? cv::Scalar(80, 220, 80) : cv::Scalar(80, 220, 220);
+        mark.label = "D" + slot_s;
+        const auto path = event_path("detect_c" + slot_s);
+        if (save_event_jpg(crop, path)) {
+          (slot == 1 ? report.detect_cam1_jpg : report.detect_cam2_jpg) = path;
+        }
+      } else if (ev.kind == PlayerEventKind::Lost) {
+        mark.color = slot == 1 ? cv::Scalar(40, 40, 220) : cv::Scalar(40, 140, 255);
+        mark.label = "L" + slot_s;
+        const auto path = event_path("lost_c" + slot_s);
+        if (save_event_jpg(crop, path)) {
+          (slot == 1 ? report.lost_cam1_jpg : report.lost_cam2_jpg) = path;
+        }
+      } else {
+        mark.color = cv::Scalar(0, 220, 255);
+        mark.label = "J" + slot_s;
+        const auto path = event_path("join_c" + slot_s);
+        if (save_event_jpg(crop, path)) {
+          (slot == 1 ? report.join_cam1_jpg : report.join_cam2_jpg) = path;
+        }
+      }
+      marks.push_back(std::move(mark));
+    }
+
+    if (!report.detect_cam1_jpg.empty()) {
+      report.snapshot_jpg = report.detect_cam1_jpg;
+    } else if (!player.snapshot.empty()) {
+      const auto path = event_path("detect");
+      if (save_event_jpg(player.snapshot, path)) {
+        report.snapshot_jpg = path;
+        report.detect_cam1_jpg = path;
+      }
+    }
+
+    const std::filesystem::path event_map_path =
+        heatmap_dir / ("player_" + std::to_string(report.player_number) + "_events.png");
+    const double span_x = pixel_mode
+                              ? static_cast<double>(std::max(1, heatmap_frame_size.width))
+                              : config.pitch_length_m;
+    const double span_y = pixel_mode
+                              ? static_cast<double>(std::max(1, heatmap_frame_size.height))
+                              : config.pitch_width_m;
+    if (write_pitch_event_diagram_png(event_map_path, marks, span_x, span_y, pixel_mode)) {
+      report.event_map_png = event_map_path;
     }
 
     reports.push_back(std::move(report));

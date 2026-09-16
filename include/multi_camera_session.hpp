@@ -15,6 +15,9 @@ struct MultiCameraResult {
   AnalysisQuality quality;
   std::filesystem::path global_csv;
   std::filesystem::path pdf_report;
+  std::filesystem::path detection_report_txt;
+  std::filesystem::path detection_report_csv;
+  std::filesystem::path compression_log;
   std::vector<std::filesystem::path> annotated_videos;
   double analysis_duration_s{0.0};
   bool success{false};

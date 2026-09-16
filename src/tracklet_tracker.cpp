@@ -1,7 +1,6 @@
 #include "tracklet_tracker.hpp"
 
 #include <algorithm>
-#include <limits>
 
 double TrackletTracker::iou(const cv::Rect2d& a, const cv::Rect2d& b) {
   const double x1 = std::max(a.x, b.x);
@@ -13,6 +12,30 @@ double TrackletTracker::iou(const cv::Rect2d& a, const cv::Rect2d& b) {
   return uni > 0.0 ? inter / uni : 0.0;
 }
 
+std::vector<Tracklet> TrackletTracker::active_tracks() const {
+  std::vector<Tracklet> active;
+  for (const auto& t : tracks_) {
+    if (t.time_since_update <= max_visible_miss_) {
+      active.push_back(t);
+    }
+  }
+  return active;
+}
+
+std::vector<Tracklet> TrackletTracker::predict() {
+  for (auto& track : tracks_) {
+    ++track.time_since_update;
+  }
+
+  const int erase_after = std::max(30, max_visible_miss_ * 4);
+  tracks_.erase(std::remove_if(tracks_.begin(), tracks_.end(),
+                               [erase_after](const Tracklet& t) {
+                                 return t.time_since_update > erase_after;
+                               }),
+                tracks_.end());
+  return active_tracks();
+}
+
 std::vector<Tracklet> TrackletTracker::update(const std::vector<Detection>& detections) {
   for (auto& track : tracks_) {
     ++track.time_since_update;
@@ -22,7 +45,7 @@ std::vector<Tracklet> TrackletTracker::update(const std::vector<Detection>& dete
   for (auto& track : tracks_) {
     if (!track.active) continue;
 
-    double best_iou = 0.2;
+    double best_iou = 0.25;
     int best_idx = -1;
     for (size_t i = 0; i < detections.size(); ++i) {
       if (det_used[i]) continue;
@@ -36,6 +59,9 @@ std::vector<Tracklet> TrackletTracker::update(const std::vector<Detection>& dete
       track.bbox = detections[best_idx].box;
       track.time_since_update = 0;
       ++track.age;
+      ++track.detect_hits;
+      track.max_confidence =
+          std::max(track.max_confidence, detections[best_idx].confidence);
       det_used[best_idx] = true;
     }
   }
@@ -46,16 +72,17 @@ std::vector<Tracklet> TrackletTracker::update(const std::vector<Detection>& dete
     t.id = next_id_++;
     t.bbox = detections[i].box;
     t.age = 1;
+    t.detect_hits = 1;
+    t.max_confidence = detections[i].confidence;
     tracks_.push_back(t);
   }
 
+  const int erase_after = std::max(30, max_visible_miss_ * 4);
   tracks_.erase(std::remove_if(tracks_.begin(), tracks_.end(),
-                               [](const Tracklet& t) { return t.time_since_update > 30; }),
+                               [erase_after](const Tracklet& t) {
+                                 return t.time_since_update > erase_after;
+                               }),
                 tracks_.end());
 
-  std::vector<Tracklet> active;
-  for (const auto& t : tracks_) {
-    if (t.time_since_update <= 1) active.push_back(t);
-  }
-  return active;
+  return active_tracks();
 }

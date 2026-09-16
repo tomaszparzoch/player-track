@@ -14,8 +14,11 @@
 
 #include "multi_camera_session.hpp"
 #include "pitch_calibration.hpp"
+#include "pitch_model.hpp"
 #include "project_config.hpp"
+#include "camera_sidecar.hpp"
 #include "app_options.hpp"
+#include "path_utils.hpp"
 #include "time_format.hpp"
 
 #include <chrono>
@@ -47,8 +50,16 @@ std::string open_video_dialog() {
 std::string open_video_dialog() { return {}; }
 #endif
 
-const char* role_labels[] = {"corner_tl", "corner_tr", "corner_bl", "corner_br",
-                             "side_left", "side_right", "tactical_pan", "unknown"};
+const char* role_labels[] = {
+    "Naroznik gora-lewo",
+    "Naroznik gora-prawo",
+    "Naroznik dol-lewo",
+    "Naroznik dol-prawo",
+    "Linia boczna (lewa)",
+    "Linia boczna (prawa)",
+    "Kamera taktyczna (pan)",
+    "Nieznana / inna",
+};
 
 }  // namespace
 
@@ -76,14 +87,52 @@ int run_gui_app() {
   ProjectConfig project;
   char output_dir[256];
   std::strncpy(output_dir, project.output_dir.c_str(), sizeof(output_dir) - 1);
+  output_dir[sizeof(output_dir) - 1] = '\0';
+
+  const std::filesystem::path session_file = last_session_config_path();
+  std::filesystem::path project_file = session_file;
+  if (const auto found = resolve_resource_path("project.ptproj");
+      std::filesystem::exists(found) && found.is_absolute()) {
+    project_file = found;
+  } else {
+    project_file = application_directory() / "project.ptproj";
+  }
+
+  auto persist_config = [&](const ProjectConfig& config) {
+    save_project_config(session_file, config);
+    save_project_config(project_file, config);
+  };
 
   bool analyzing = false;
+  bool item_was_active = false;
   double progress = 0.0;
   double elapsed_s = 0.0;
   double eta_s = -1.0;
   double last_analysis_duration_s = 0.0;
   std::string status = "Ready";
   MultiCameraResult last_result;
+
+  if (std::filesystem::exists(session_file)) {
+    if (auto loaded = load_project_config(session_file)) {
+      project = *loaded;
+      std::strncpy(output_dir, project.output_dir.c_str(), sizeof(output_dir) - 1);
+      output_dir[sizeof(output_dir) - 1] = '\0';
+      status = "Wczytano ostatnia sesje";
+    }
+  } else if (std::filesystem::exists(project_file)) {
+    if (auto loaded = load_project_config(project_file)) {
+      project = *loaded;
+      std::strncpy(output_dir, project.output_dir.c_str(), sizeof(output_dir) - 1);
+      output_dir[sizeof(output_dir) - 1] = '\0';
+      persist_config(project);
+      status = "Loaded " + project_file.filename().string();
+    }
+  }
+
+  auto apply_output_dir = [&]() {
+    output_dir[sizeof(output_dir) - 1] = '\0';
+    project.output_dir = output_dir;
+  };
 
   while (!glfwWindowShouldClose(window)) {
     glfwPollEvents();
@@ -94,7 +143,38 @@ int run_gui_app() {
     ImGui::Begin("Player Track Project");
     ImGui::Text("Mode: %s", project_mode_to_string(project.mode()).c_str());
     ImGui::InputText("Output dir", output_dir, sizeof(output_dir));
-    project.output_dir = output_dir;
+    apply_output_dir();
+
+    ImGui::Separator();
+    ImGui::Text("Boisko");
+    ImGui::InputDouble("Dlugosc (m)", &project.pitch_length_m, 0.5, 1.0, "%.1f");
+    ImGui::InputDouble("Szerokosc (m)", &project.pitch_width_m, 0.5, 1.0, "%.1f");
+    if (project.pitch_length_m <= 0.0) project.pitch_length_m = 1.0;
+    if (project.pitch_width_m <= 0.0) project.pitch_width_m = 1.0;
+    if (ImGui::Button("105 x 68 (boisko zewnetrzne)")) {
+      project.pitch_length_m = 105.0;
+      project.pitch_width_m = 68.0;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("40 x 20 (sala)")) {
+      project.pitch_length_m = 40.0;
+      project.pitch_width_m = 20.0;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("36 x 18 (sala mala)")) {
+      project.pitch_length_m = 36.0;
+      project.pitch_width_m = 18.0;
+    }
+    ImGui::Checkbox("Tryb sali (znaczniki)", &project.hall_mode);
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip(
+          "Druzyny rozrozniane po zielonych znacznikach/koszulkach.\n"
+          "TeamA / \"Zielone\" = gracze ze znacznikiem, TeamB = bez znacznika.");
+    }
+    if (project.hall_mode) {
+      ImGui::TextColored({0.7f, 0.95f, 0.7f, 1},
+                         "Tryb sali: tylko znaczniki (zielone / bez). Numery koszulek wylaczone.");
+    }
 
     if (ImGui::Button("Add camera")) {
       const std::string path = open_video_dialog();
@@ -104,7 +184,12 @@ int run_gui_app() {
         cam.name = std::filesystem::path(path).stem().string();
         cam.motion = CameraMotion::Static;
         cam.world_coords = false;
+        if (load_camera_sidecar(path, cam)) {
+          status = "Wczytano ustawienia kamery z " +
+                    camera_sidecar_path(path).filename().string();
+        }
         project.cameras.push_back(cam);
+        persist_config(project);
       }
     }
 
@@ -117,46 +202,65 @@ int run_gui_app() {
       ImGui::SliderFloat("Offset (s)", reinterpret_cast<float*>(&cam.offset_s), -30.0f, 30.0f);
 
       int role_idx = static_cast<int>(cam.role);
-      if (ImGui::Combo("Role", &role_idx, role_labels, IM_ARRAYSIZE(role_labels))) {
+      if (ImGui::Combo("Rola kamery", &role_idx, role_labels, IM_ARRAYSIZE(role_labels))) {
         cam.role = static_cast<CameraRole>(role_idx);
         if (cam.role == CameraRole::TacticalPan) cam.motion = CameraMotion::Panning;
+        save_camera_sidecar(cam.video_path, cam, nullptr);
+        persist_config(project);
+      }
+      if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Dla kamer w naroznikach wybierz odpowiedni naroznik boiska.\n"
+            "Rola wplywa na kolejnosc i opis punktow kalibracji.");
       }
 
       int motion_idx = cam.motion == CameraMotion::Panning ? 1 : 0;
-      if (ImGui::Combo("Motion", &motion_idx, "static\0panning\0")) {
+      if (ImGui::Combo("Ruch kamery", &motion_idx, "stala\0panning\0")) {
         cam.motion = motion_idx == 1 ? CameraMotion::Panning : CameraMotion::Static;
       }
 
       if (project.mode() != ProjectMode::TacticalOnly) {
-        ImGui::Checkbox("Use for world coords", &cam.world_coords);
+        ImGui::Checkbox("Wspolrzedne swiata (metry)", &cam.world_coords);
         if (!cam.world_coords) {
           ImGui::TextColored({0.7f, 0.9f, 0.7f, 1},
-                             "Pixel mode: tracks/heatmaps in image coords (no calibration).");
+                             "Tryb pikseli: heatmapy i trasy w px (bez kalibracji boiska).");
         }
       } else {
         cam.world_coords = true;
-        ImGui::Text("World coords: enabled (tactical only mode)");
+        ImGui::Text("Wspolrzedne swiata: wlaczone (tryb taktyczny)");
       }
 
       if (cam.world_coords && !cam.is_panning()) {
-        if (ImGui::Button("Calibrate")) {
+        if (ImGui::Button("Kalibruj boisko")) {
           cv::VideoCapture cap(cam.video_path);
           cv::Mat frame;
           if (cap.read(frame) && !frame.empty()) {
+            const PitchModel calib_model(project.pitch_length_m, project.pitch_width_m);
             PitchCalibration calib;
-            const PitchModel model(project.pitch_length_m, project.pitch_width_m);
-            if (calib.calibrate_lines_interactive(frame, model)) {
-              cam.calib_path = (std::filesystem::path(output_dir) / (cam.name + ".calib")).string();
-              std::filesystem::create_directories(output_dir);
-              calib.save(cam.calib_path);
-              status = "Calibrated " + cam.name;
+            if (calib.calibrate_lines_interactive(frame, calib_model, cam.role)) {
+              const auto calib_path =
+                  camera_sidecar_path(cam.video_path).replace_extension(".calib");
+              calib.save(calib_path);
+              cam.calib_path = calib_path.string();
+              save_camera_sidecar(cam.video_path, cam, &calib);
+              persist_config(project);
+              status = "Skalibrowano i zapisano obok wideo: " + calib_path.filename().string();
             }
+          } else {
+            status = "Nie mozna odczytac klatki z wideo: " + cam.name;
           }
         }
         ImGui::SameLine();
+        const auto sidecar = camera_sidecar_path(cam.video_path);
+        if (std::filesystem::exists(sidecar)) {
+          ImGui::Text("Sidecar: %s", sidecar.filename().string().c_str());
+        } else if (!cam.calib_path.empty()) {
+          ImGui::Text("Plik: %s", cam.calib_path.c_str());
+        }
       }
       if (ImGui::Button("Remove")) {
         project.cameras.erase(project.cameras.begin() + i);
+        persist_config(project);
         ImGui::PopID();
         break;
       }
@@ -169,11 +273,43 @@ int run_gui_app() {
 
     ImGui::Separator();
     ImGui::Text("Performance");
+    ImGui::SliderFloat("Detect confidence", &project.detect_confidence, 0.10f, 0.80f, "%.2f");
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("Lower = more detections (try 0.20-0.30 for top-down cameras).");
+    }
     ImGui::SliderInt("Detect every N frames", &project.detect_frame_step, 1, 10);
     ImGui::SliderInt("Max detect width (px)", &project.detect_max_width, 640, 1920);
     ImGui::SliderInt("Detect input size", &project.detect_input_size, 320, 1280);
     ImGui::SliderInt("OCR every N detect frames", &project.ocr_frame_step, 5, 60);
+    ImGui::InputDouble("Analyze max seconds", &project.analyze_max_seconds, 1.0, 5.0, "%.0f");
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip(
+          "Limit analysis and annotated video export to the first N seconds of each video. "
+          "0 = full length.");
+    }
+    if (project.analyze_max_seconds < 0.0) {
+      project.analyze_max_seconds = 0.0;
+    }
     ImGui::Checkbox("Write annotated MP4", &project.write_annotated_video);
+    if (project.write_annotated_video) {
+      ImGui::Checkbox("Compress annotated MP4 (H.264)", &project.annotated_video_compress);
+      if (project.annotated_video_compress) {
+        ImGui::Checkbox("Match source video bitrate", &project.annotated_video_match_source_bitrate);
+        if (ImGui::IsItemHovered()) {
+          ImGui::SetTooltip("Target size close to the original recording (recommended).");
+        }
+        ImGui::SliderInt("Annotated max width", &project.annotated_video_max_width, 0, 1920);
+        if (ImGui::IsItemHovered()) {
+          ImGui::SetTooltip("1280 is a good default. 0 = full resolution (much larger file).");
+        }
+        if (!project.annotated_video_match_source_bitrate) {
+          ImGui::SliderInt("Video quality (CRF)", &project.annotated_video_crf, 28, 38);
+          if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Higher CRF = smaller file, lower quality.");
+          }
+        }
+      }
+    }
 
     int backend_idx = 0;
     switch (project.dnn_backend) {
@@ -199,6 +335,8 @@ int run_gui_app() {
 
     ImGui::Separator();
     if (!analyzing && ImGui::Button("Run analysis") && !project.cameras.empty()) {
+      apply_output_dir();
+      persist_config(project);
       analyzing = true;
       progress = 0.0;
       elapsed_s = 0.0;
@@ -240,24 +378,47 @@ int run_gui_app() {
       if (last_result.success) {
         ImGui::Text("PDF: %s", last_result.pdf_report.string().c_str());
         ImGui::Text("CSV: %s", last_result.global_csv.string().c_str());
+        ImGui::Text("Detection report: %s", last_result.detection_report_txt.string().c_str());
+        ImGui::Text("Compression log: %s", last_result.compression_log.string().c_str());
         for (const auto& v : last_result.annotated_videos) {
           ImGui::Text("Video: %s", v.string().c_str());
         }
       }
     }
 
+    ImGui::TextWrapped("Konfiguracja: %s", session_file.string().c_str());
+    ImGui::TextWrapped("Projekt: %s", project_file.string().c_str());
     if (ImGui::Button("Save project")) {
-      save_project_config("project.ptproj", project);
-      status = "Saved project.ptproj";
+      apply_output_dir();
+      persist_config(project);
+      status = "Zapisano konfiguracje";
     }
     ImGui::SameLine();
     if (ImGui::Button("Load project")) {
-      if (auto loaded = load_project_config("project.ptproj")) {
+      std::optional<ProjectConfig> loaded;
+      if (std::filesystem::exists(project_file)) {
+        loaded = load_project_config(project_file);
+      }
+      if (!loaded) {
+        loaded = load_project_config(session_file);
+      }
+      if (loaded) {
         project = *loaded;
         std::strncpy(output_dir, project.output_dir.c_str(), sizeof(output_dir) - 1);
-        status = "Loaded project.ptproj";
+        output_dir[sizeof(output_dir) - 1] = '\0';
+        persist_config(project);
+        status = "Wczytano konfiguracje";
+      } else {
+        status = "Failed to load config";
       }
     }
+
+    const bool item_active = ImGui::IsAnyItemActive();
+    if (item_was_active && !item_active) {
+      apply_output_dir();
+      persist_config(project);
+    }
+    item_was_active = item_active;
 
     ImGui::End();
     ImGui::Render();
@@ -269,6 +430,9 @@ int run_gui_app() {
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     glfwSwapBuffers(window);
   }
+
+  apply_output_dir();
+  persist_config(project);
 
   ImGui_ImplOpenGL3_Shutdown();
   ImGui_ImplGlfw_Shutdown();

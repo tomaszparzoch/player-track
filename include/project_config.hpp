@@ -11,6 +11,7 @@
 struct ProjectConfig {
   double pitch_length_m{105.0};
   double pitch_width_m{68.0};
+  bool hall_mode{false};
   double sprint_threshold_m_s{7.0};
   double hi_run_threshold_m_s{5.5};
   std::string output_dir{"results"};
@@ -24,6 +25,11 @@ struct ProjectConfig {
   int dynamic_calib_step{5};
   DnnBackend dnn_backend{DnnBackend::Auto};
   bool write_annotated_video{true};
+  bool annotated_video_compress{true};
+  int annotated_video_crf{32};
+  int annotated_video_max_width{1280};
+  bool annotated_video_match_source_bitrate{true};
+  double analyze_max_seconds{0.0};
   std::vector<CameraConfig> cameras;
 
   ProjectMode mode() const { return detect_project_mode(cameras); }
@@ -33,3 +39,4 @@ struct ProjectConfig {
 
 bool save_project_config(const std::filesystem::path& path, const ProjectConfig& config);
 std::optional<ProjectConfig> load_project_config(const std::filesystem::path& path);
+std::filesystem::path last_session_config_path();

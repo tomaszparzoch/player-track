@@ -7,6 +7,7 @@
 
 #include <opencv2/core.hpp>
 
+#include "camera_config.hpp"
 #include "pitch_model.hpp"
 
 class PitchCalibration {
@@ -14,7 +15,8 @@ class PitchCalibration {
   bool load(const std::filesystem::path& path);
   bool save(const std::filesystem::path& path) const;
   bool calibrate_interactive(const cv::Mat& frame, double pitch_length_m, double pitch_width_m);
-  bool calibrate_lines_interactive(const cv::Mat& frame, const PitchModel& model);
+  bool calibrate_lines_interactive(const cv::Mat& frame, const PitchModel& model,
+                                   CameraRole role = CameraRole::Unknown);
   bool valid() const { return valid_; }
 
   cv::Point2d image_to_meters(double x_px, double y_px) const;

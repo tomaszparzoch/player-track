@@ -3,6 +3,7 @@
 #include <cmath>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <string>
 
@@ -19,12 +20,50 @@ struct RectCalibrateUi {
 
 struct LineCalibrateUi {
   cv::Mat frame;
-  PitchModel model;
-  std::vector<std::string> landmark_ids;
-  std::vector<cv::Point2f> image_points;
-  std::vector<cv::Point2f> field_points;
+  std::vector<PitchLandmark> landmarks;
+  std::vector<std::optional<cv::Point2f>> answers;
   int current_index{0};
+  int panel_h{230};
+  int placed_count{0};
+  int skipped_count{0};
 };
+
+void draw_wrapped_text(cv::Mat& canvas, const std::string& text, cv::Point origin, int max_width,
+                       double font_scale, cv::Scalar color, int thickness) {
+  std::string word;
+  std::string line;
+  int y = origin.y;
+  const auto flush = [&]() {
+    if (line.empty()) return;
+    cv::putText(canvas, line, {origin.x, y}, cv::FONT_HERSHEY_SIMPLEX, font_scale, color,
+                thickness, cv::LINE_AA);
+    y += static_cast<int>(18 * font_scale / 0.5);
+    line.clear();
+  };
+
+  for (char ch : text) {
+    if (ch == ' ') {
+      const std::string candidate = line.empty() ? word : line + ' ' + word;
+      int baseline = 0;
+      const cv::Size size =
+          cv::getTextSize(candidate, cv::FONT_HERSHEY_SIMPLEX, font_scale, thickness, &baseline);
+      if (size.width > max_width && !line.empty()) {
+        flush();
+        line = word;
+      } else {
+        line = candidate;
+      }
+      word.clear();
+    } else {
+      word.push_back(ch);
+    }
+  }
+  if (!word.empty()) {
+    const std::string candidate = line.empty() ? word : line + ' ' + word;
+    line = candidate;
+  }
+  flush();
+}
 
 void on_rect_mouse(int event, int x, int y, int, void* userdata) {
   if (event != cv::EVENT_LBUTTONDOWN || userdata == nullptr) return;
@@ -36,15 +75,43 @@ void on_rect_mouse(int event, int x, int y, int, void* userdata) {
 void on_line_mouse(int event, int x, int y, int, void* userdata) {
   if (event != cv::EVENT_LBUTTONDOWN || userdata == nullptr) return;
   auto* ui = static_cast<LineCalibrateUi*>(userdata);
-  if (ui->current_index >= static_cast<int>(ui->landmark_ids.size())) return;
+  if (ui->current_index >= static_cast<int>(ui->landmarks.size())) return;
+  if (y < ui->panel_h) return;
 
-  const auto lm = ui->model.find_landmark(ui->landmark_ids[ui->current_index]);
-  if (!lm) return;
-
-  ui->image_points.push_back({static_cast<float>(x), static_cast<float>(y)});
-  ui->field_points.push_back(
-      {static_cast<float>(lm->field_m.x), static_cast<float>(lm->field_m.y)});
+  ui->answers[ui->current_index] =
+      cv::Point2f(static_cast<float>(x), static_cast<float>(y - ui->panel_h));
+  ++ui->placed_count;
   ++ui->current_index;
+}
+
+void skip_current_landmark(LineCalibrateUi& ui) {
+  if (ui.current_index >= static_cast<int>(ui.landmarks.size())) return;
+  if (ui.answers[ui.current_index].has_value()) return;
+  ++ui.skipped_count;
+  ++ui.current_index;
+}
+
+void undo_last_landmark(LineCalibrateUi& ui) {
+  if (ui.current_index <= 0) return;
+  --ui.current_index;
+  if (ui.answers[ui.current_index].has_value()) {
+    ui.answers[ui.current_index] = std::nullopt;
+    --ui.placed_count;
+  } else {
+    --ui.skipped_count;
+  }
+}
+
+void collect_calibration_points(const LineCalibrateUi& ui, std::vector<cv::Point2f>& image_pts,
+                                std::vector<cv::Point2f>& field_pts) {
+  image_pts.clear();
+  field_pts.clear();
+  for (size_t i = 0; i < ui.landmarks.size(); ++i) {
+    if (!ui.answers[i].has_value()) continue;
+    image_pts.push_back(*ui.answers[i]);
+    field_pts.push_back({static_cast<float>(ui.landmarks[i].field_m.x),
+                         static_cast<float>(ui.landmarks[i].field_m.y)});
+  }
 }
 
 void draw_rect_ui(cv::Mat& canvas, const std::vector<cv::Point2f>& clicks) {
@@ -58,12 +125,12 @@ void draw_rect_ui(cv::Mat& canvas, const std::vector<cv::Point2f>& clicks) {
 }
 
 void draw_line_ui(cv::Mat& canvas, const LineCalibrateUi& ui) {
-  for (size_t i = 0; i < ui.image_points.size(); ++i) {
-    const cv::Point p(cvRound(ui.image_points[i].x), cvRound(ui.image_points[i].y));
+  for (size_t i = 0; i < ui.landmarks.size(); ++i) {
+    if (!ui.answers[i].has_value()) continue;
+    const cv::Point p(cvRound(ui.answers[i]->x), cvRound(ui.answers[i]->y + ui.panel_h));
     cv::circle(canvas, p, 6, {0, 255, 255}, cv::FILLED);
-    const std::string label = i < ui.landmark_ids.size() ? ui.landmark_ids[i] : "?";
-    cv::putText(canvas, label, {p.x + 8, p.y - 8}, cv::FONT_HERSHEY_SIMPLEX, 0.5, {255, 255, 255},
-                1, cv::LINE_AA);
+    cv::putText(canvas, std::to_string(i + 1) + ". " + ui.landmarks[i].label, {p.x + 8, p.y - 8},
+                cv::FONT_HERSHEY_SIMPLEX, 0.5, {255, 255, 255}, 1, cv::LINE_AA);
   }
 }
 
@@ -159,32 +226,52 @@ bool PitchCalibration::calibrate_interactive(const cv::Mat& frame, double pitch_
   return build_homography_rect(ui.clicks, pitch_length_m, pitch_width_m);
 }
 
-bool PitchCalibration::calibrate_lines_interactive(const cv::Mat& frame, const PitchModel& model) {
+bool PitchCalibration::calibrate_lines_interactive(const cv::Mat& frame, const PitchModel& model,
+                                                   CameraRole role) {
   if (frame.empty()) return false;
 
   LineCalibrateUi ui;
   ui.frame = frame.clone();
-  ui.model = model;
-  for (const auto& lm : model.landmarks()) {
-    ui.landmark_ids.push_back(lm.id);
-  }
+  ui.landmarks = model.corner_calibration_landmarks(role);
+  ui.answers.assign(ui.landmarks.size(), std::nullopt);
 
-  const std::string window = "Line calibration: click landmarks, Enter when >=4, Esc cancel";
+  const std::string window = "Kalibracja boiska - klikaj punkty po kolei";
   cv::namedWindow(window, cv::WINDOW_NORMAL);
+  cv::resizeWindow(window, std::min(1280, frame.cols), std::min(920, frame.rows + 240));
   cv::setMouseCallback(window, on_line_mouse, &ui);
 
   while (true) {
     cv::Mat canvas = ui.frame.clone();
+    const int panel_h = ui.panel_h;
+    cv::Mat panel(panel_h, canvas.cols, CV_8UC3, cv::Scalar(24, 24, 24));
+    cv::vconcat(panel, canvas, canvas);
+
     draw_line_ui(canvas, ui);
-    std::string status = "Points: " + std::to_string(ui.image_points.size()) + " (min 4)";
-    if (ui.current_index < static_cast<int>(ui.landmark_ids.size())) {
-      const auto lm = model.find_landmark(ui.landmark_ids[ui.current_index]);
-      if (lm) status += " | Next: " + lm->label;
-    }
-    cv::putText(canvas, status, {20, 30}, cv::FONT_HERSHEY_SIMPLEX, 0.6, {255, 255, 255}, 2,
+
+    const int total = static_cast<int>(ui.landmarks.size());
+    std::string status = "Zaznaczone: " + std::to_string(ui.placed_count) + " | Pominiete: " +
+                         std::to_string(ui.skipped_count) + " | Krok " +
+                         std::to_string(std::min(ui.current_index + 1, total)) + "/" +
+                         std::to_string(total) + " (min. 4 punkty, Enter = zakoncz)";
+    cv::putText(canvas, status, {20, 28}, cv::FONT_HERSHEY_SIMPLEX, 0.58, {255, 255, 255}, 2,
                 cv::LINE_AA);
-    cv::putText(canvas, "Keys: Enter=finish, Backspace=undo, Esc=cancel", {20, 60},
-                cv::FONT_HERSHEY_SIMPLEX, 0.55, {200, 200, 200}, 1, cv::LINE_AA);
+
+    if (ui.current_index < total) {
+      const auto& next = ui.landmarks[ui.current_index];
+      cv::putText(canvas, "Nastepny punkt " + std::to_string(ui.current_index + 1) + ": " + next.label,
+                  {20, 52}, cv::FONT_HERSHEY_SIMPLEX, 0.56, {0, 220, 255}, 2, cv::LINE_AA);
+      draw_wrapped_text(canvas, next.instruction, {20, 72}, canvas.cols - 40, 0.50, {210, 210, 210},
+                        1);
+      draw_wrapped_text(canvas,
+                        "Jesli punkt jest poza kadrem, wcisnij S (Skip/Pomin) i przejdz dalej.",
+                        {20, 150}, canvas.cols - 40, 0.48, {180, 220, 180}, 1);
+    } else {
+      cv::putText(canvas, "Wszystkie kroki zakonczone. Enter = zakoncz, Esc = anuluj", {20, 52},
+                  cv::FONT_HERSHEY_SIMPLEX, 0.58, {0, 255, 128}, 2, cv::LINE_AA);
+    }
+
+    cv::putText(canvas, "S = pomin punkt | Backspace = cofnij | Esc = anuluj", {20, panel_h - 12},
+                cv::FONT_HERSHEY_SIMPLEX, 0.48, {160, 160, 160}, 1, cv::LINE_AA);
     cv::imshow(window, canvas);
 
     const int key = cv::waitKey(30);
@@ -192,16 +279,20 @@ bool PitchCalibration::calibrate_lines_interactive(const cv::Mat& frame, const P
       cv::destroyWindow(window);
       return false;
     }
-    if (key == 8 && !ui.image_points.empty()) {
-      ui.image_points.pop_back();
-      ui.field_points.pop_back();
-      ui.current_index = std::max(0, ui.current_index - 1);
+    if ((key == 's' || key == 'S' || key == 'n' || key == 'N') && ui.current_index < total) {
+      skip_current_landmark(ui);
     }
-    if ((key == 13 || key == 32) && ui.image_points.size() >= 4) break;
+    if (key == 8) {
+      undo_last_landmark(ui);
+    }
+    if ((key == 13 || key == 32) && ui.placed_count >= 4) break;
   }
 
   cv::destroyWindow(window);
-  return build_homography_points(ui.image_points, ui.field_points, model.length_m, model.width_m);
+  std::vector<cv::Point2f> image_pts;
+  std::vector<cv::Point2f> field_pts;
+  collect_calibration_points(ui, image_pts, field_pts);
+  return build_homography_points(image_pts, field_pts, model.length_m, model.width_m);
 }
 
 bool PitchCalibration::save(const std::filesystem::path& path) const {

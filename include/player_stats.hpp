@@ -9,6 +9,7 @@
 
 struct PlayerStatsReport {
   int player_number{};
+  int jersey_number{-1};
   TeamId team{TeamId::Unknown};
   double total_distance_m{};
   double avg_speed_m_s{};
@@ -24,6 +25,14 @@ struct PlayerStatsReport {
   float identity_confidence{};
   bool pixel_coords{false};
   std::filesystem::path heatmap_png;
+  std::filesystem::path event_map_png;
+  std::filesystem::path snapshot_jpg;
+  std::filesystem::path detect_cam1_jpg;
+  std::filesystem::path detect_cam2_jpg;
+  std::filesystem::path lost_cam1_jpg;
+  std::filesystem::path lost_cam2_jpg;
+  std::filesystem::path join_cam1_jpg;
+  std::filesystem::path join_cam2_jpg;
   std::vector<std::pair<double, double>> speed_series;
 };
 

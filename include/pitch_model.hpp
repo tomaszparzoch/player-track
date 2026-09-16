@@ -6,9 +6,12 @@
 
 #include <opencv2/core.hpp>
 
+#include "camera_config.hpp"
+
 struct PitchLandmark {
   std::string id;
   std::string label;
+  std::string instruction;
   cv::Point2d field_m;
 };
 
@@ -17,6 +20,7 @@ struct PitchModel {
   double width_m{68.0};
 
   std::vector<PitchLandmark> landmarks() const;
+  std::vector<PitchLandmark> corner_calibration_landmarks(CameraRole role) const;
   std::optional<PitchLandmark> find_landmark(const std::string& id) const;
 };
 

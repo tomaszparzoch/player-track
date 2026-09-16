@@ -25,6 +25,7 @@ set(CORE_SOURCES
   src/pitch_calibration.cpp
   src/heatmap.cpp
   src/camera_config.cpp
+  src/camera_sidecar.cpp
   src/project_config.cpp
   src/pitch_model.cpp
   src/global_track.cpp
@@ -35,6 +36,8 @@ set(CORE_SOURCES
   src/jersey_ocr.cpp
   src/identity_graph.cpp
   src/player_stats.cpp
+  src/detection_report.cpp
+  src/video_compress.cpp
   src/pitch_heatmap.cpp
   src/multi_camera_session.cpp
   src/pdf_report.cpp

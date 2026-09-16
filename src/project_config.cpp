@@ -6,6 +6,7 @@
 #include <nlohmann/json.hpp>
 
 #include "app_options.hpp"
+#include "path_utils.hpp"
 
 namespace {
 
@@ -69,6 +70,7 @@ bool ProjectConfig::validate(std::string* error) const {
 bool save_project_config(const std::filesystem::path& path, const ProjectConfig& config) {
   json j;
   j["pitch"] = {{"length_m", config.pitch_length_m}, {"width_m", config.pitch_width_m}};
+  j["hall_mode"] = config.hall_mode;
   j["sprint_threshold_m_s"] = config.sprint_threshold_m_s;
   j["hi_run_threshold_m_s"] = config.hi_run_threshold_m_s;
   j["output_dir"] = config.output_dir;
@@ -82,6 +84,11 @@ bool save_project_config(const std::filesystem::path& path, const ProjectConfig&
   j["dynamic_calib_step"] = config.dynamic_calib_step;
   j["dnn_backend"] = dnn_backend_to_string(config.dnn_backend);
   j["write_annotated_video"] = config.write_annotated_video;
+  j["annotated_video_compress"] = config.annotated_video_compress;
+  j["annotated_video_crf"] = config.annotated_video_crf;
+  j["annotated_video_max_width"] = config.annotated_video_max_width;
+  j["annotated_video_match_source_bitrate"] = config.annotated_video_match_source_bitrate;
+  j["analyze_max_seconds"] = config.analyze_max_seconds;
   j["project_mode"] = project_mode_to_string(config.mode());
   j["cameras"] = json::array();
   for (const auto& cam : config.cameras) {
@@ -110,6 +117,7 @@ std::optional<ProjectConfig> load_project_config(const std::filesystem::path& pa
     config.pitch_length_m = j["pitch"].value("length_m", 105.0);
     config.pitch_width_m = j["pitch"].value("width_m", 68.0);
   }
+  config.hall_mode = j.value("hall_mode", false);
   config.sprint_threshold_m_s = j.value("sprint_threshold_m_s", 7.0);
   config.hi_run_threshold_m_s = j.value("hi_run_threshold_m_s", 5.5);
   config.output_dir = j.value("output_dir", "results");
@@ -123,6 +131,11 @@ std::optional<ProjectConfig> load_project_config(const std::filesystem::path& pa
   config.dynamic_calib_step = std::max(1, j.value("dynamic_calib_step", 5));
   config.dnn_backend = parse_dnn_backend(j.value("dnn_backend", "auto"));
   config.write_annotated_video = j.value("write_annotated_video", true);
+  config.annotated_video_compress = j.value("annotated_video_compress", true);
+  config.annotated_video_crf = std::clamp(j.value("annotated_video_crf", 32), 23, 40);
+  config.annotated_video_max_width = j.value("annotated_video_max_width", 1280);
+  config.annotated_video_match_source_bitrate = j.value("annotated_video_match_source_bitrate", true);
+  config.analyze_max_seconds = std::max(0.0, j.value("analyze_max_seconds", 0.0));
 
   if (j.contains("cameras") && j["cameras"].is_array()) {
     for (const auto& item : j["cameras"]) {
@@ -138,4 +151,8 @@ std::optional<ProjectConfig> load_project_config(const std::filesystem::path& pa
   }
 
   return config;
+}
+
+std::filesystem::path last_session_config_path() {
+  return application_directory() / "last_session.ptproj";
 }
